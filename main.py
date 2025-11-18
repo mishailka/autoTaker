@@ -9,6 +9,8 @@ from selenium.common.exceptions import (
     StaleElementReferenceException,
 )
 
+from settings import AUTO_TAKE_ENABLED, AUTO_STATUS_UPDATE_ENABLED
+
 # ===== НАСТРОЙКИ =====
 RT_URL = "https://rt.original-group.ru/"
 USERNAME = "m.siluyanov"
@@ -155,7 +157,9 @@ def get_tickets_from_block(titlebox):
     return tickets
 
 
-def set_ticket_in_work(driver, ticket_link, main_window_handle, need_take: bool):
+def set_ticket_in_work(
+    driver, ticket_link, main_window_handle, need_take: bool
+):
     """
     Открывает тикет в НОВОЙ вкладке.
 
@@ -167,6 +171,13 @@ def set_ticket_in_work(driver, ticket_link, main_window_handle, need_take: bool)
 
     Вкладку тикета не закрывает, возвращается на основную.
     """
+    should_take = need_take and AUTO_TAKE_ENABLED
+    should_set_status = AUTO_STATUS_UPDATE_ENABLED
+
+    if not should_take and not should_set_status:
+        print("  → Автоматические действия отключены, тикет пропускаем.")
+        return
+
     # Открываем новую вкладку c тикетом
     driver.execute_script("window.open(arguments[0]);", ticket_link)
     new_window_handle = driver.window_handles[-1]
@@ -176,7 +187,7 @@ def set_ticket_in_work(driver, ticket_link, main_window_handle, need_take: bool)
 
     try:
         # --- шаг 1: при необходимости "Взять" ---
-        if need_take:
+        if should_take:
             # раскрываем меню "Действия" (если есть)
             try:
                 actions_menu = wait.until(
@@ -190,46 +201,59 @@ def set_ticket_in_work(driver, ticket_link, main_window_handle, need_take: bool)
                 take_action = wait.until(
                     EC.element_to_be_clickable((By.ID, "page-actions-take"))
                 )
-                take_action.click()
-                # ждём перезагрузку/обновление страницы после "Взять"
-                wait.until(
-                    EC.presence_of_element_located((By.ID, "page-actions"))
-                )
+                button_text = take_action.text.strip().lower()
+                if "взять" not in button_text:
+                    print(
+                        "  → Пропускаем 'Взять': кнопка не в режиме 'Взять' (вероятно, тикет уже на вас)."
+                    )
+                else:
+                    take_action.click()
+                    # ждём перезагрузку/обновление страницы после "Взять"
+                    wait.until(
+                        EC.presence_of_element_located((By.ID, "page-actions"))
+                    )
             except TimeoutException:
                 print(f"Не удалось 'Взять' тикет: {ticket_link}")
+        else:
+            print("  → Авто-взятие отключено или не требуется.")
 
-        # --- шаг 2: "В работе" ---
-        # снова раскрываем меню "Действия" (после возможной перезагрузки)
-        try:
-            actions_menu = wait.until(
-                EC.element_to_be_clickable((By.ID, "page-actions"))
+        if should_set_status:
+            # --- шаг 2: "В работе" ---
+            # снова раскрываем меню "Действия" (после возможной перезагрузки)
+            try:
+                actions_menu = wait.until(
+                    EC.element_to_be_clickable((By.ID, "page-actions"))
+                )
+                actions_menu.click()
+            except TimeoutException:
+                pass
+
+            # <a id="page-actions-inprogress" ...>В работе</a>
+            work_action = wait.until(
+                EC.element_to_be_clickable((By.ID, "page-actions-inprogress"))
             )
-            actions_menu.click()
-        except TimeoutException:
-            pass
+            work_action.click()
 
-        # <a id="page-actions-inprogress" ...>В работе</a>
-        work_action = wait.until(
-            EC.element_to_be_clickable((By.ID, "page-actions-inprogress"))
-        )
-        work_action.click()
-
-        # --- шаг 3: жмём "Изменить заявку" ---
-        submit_button = wait.until(
-            EC.element_to_be_clickable(
-                (
-                    By.XPATH,
-                    "//input[@type='submit' and @name='SubmitTicket' and @value='Изменить заявку']",
+            # --- шаг 3: жмём "Изменить заявку" ---
+            submit_button = wait.until(
+                EC.element_to_be_clickable(
+                    (
+                        By.XPATH,
+                        "//input[@type='submit' and @name='SubmitTicket' and @value='Изменить заявку']",
+                    )
                 )
             )
-        )
-        submit_button.click()
+            submit_button.click()
 
-        time.sleep(1)
-        if need_take:
-            print(f"Тикет {ticket_link} ВЗЯТ и переведён в 'В работе' + сохранён.")
+            time.sleep(1)
+            if should_take:
+                print(
+                    f"Тикет {ticket_link} ВЗЯТ (при необходимости) и переведён в 'В работе' + сохранён."
+                )
+            else:
+                print(f"Тикет {ticket_link} переведён в 'В работе' + сохранён.")
         else:
-            print(f"Тикет {ticket_link} переведён в 'В работе' + сохранён.")
+            print("  → Автоустановка статуса отключена.")
     except TimeoutException:
         print(f"Не удалось полностью обработать тикет: {ticket_link}")
     finally:
@@ -277,7 +301,14 @@ def main():
                         f"Новая заявка #{ticket_id} | статус: '{ticket['status']}' | тема: '{subject}'"
                     )
                     if need_take:
-                        print("  → Тема содержит ключевое слово, будем сначала 'Взять' тикет.")
+                        if AUTO_TAKE_ENABLED:
+                            print(
+                                "  → Тема содержит ключевое слово, будем сначала 'Взять' тикет."
+                            )
+                        else:
+                            print(
+                                "  → Тема содержит ключевое слово, но авто-взятие сейчас отключено."
+                            )
 
                     set_ticket_in_work(
                         driver,
