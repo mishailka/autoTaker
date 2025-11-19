@@ -197,7 +197,6 @@ def get_tickets_from_block(titlebox):
 
 def main():
     driver = webdriver.Chrome()
-    driver.maximize_window()
 
     try:
         login(driver)
