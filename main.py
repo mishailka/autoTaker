@@ -1,4 +1,5 @@
 import time
+import sys
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -9,7 +10,19 @@ from selenium.common.exceptions import (
     StaleElementReferenceException,
 )
 
-from settings import AUTO_TAKE_ENABLED, AUTO_STATUS_UPDATE_ENABLED
+try:
+    import winsound
+except ImportError:  # pragma: no cover - доступность зависит от ОС
+    winsound = None
+
+from settings import (
+    AUTO_STATUS_UPDATE_ENABLED,
+    AUTO_TAKE_ENABLED,
+    NEW_TICKET_FOCUS_SECONDS,
+    OPEN_ONLY_MODE,
+    SOUND_ALERT_ON_NEW_TICKET,
+    TEST_TICKET_LINK,
+)
 
 # ===== НАСТРОЙКИ =====
 RT_URL = "https://rt.original-group.ru/"
@@ -22,6 +35,58 @@ KEYWORDS = [
     "ввод кодов",
     # добавляй свои слова сюда
 ]
+
+
+def play_sound_alert():
+    """Простой звуковой сигнал для новой заявки."""
+
+    if not SOUND_ALERT_ON_NEW_TICKET:
+        return
+
+    if winsound is not None:
+        try:
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            return
+        except RuntimeError:
+            # Если ОС не поддерживает определённый тип сигнала, попробуем дефолтный
+            try:
+                winsound.MessageBeep()
+                return
+            except RuntimeError:
+                pass
+
+    # Фолбэк — стандартный системный "beep" через консоль
+    sys.stdout.write("\a")
+    sys.stdout.flush()
+
+
+def focus_new_ticket_tab(driver):
+    """Пробуем вывести вкладку с тикетом на передний план."""
+
+    try:
+        driver.execute_script("window.focus();")
+    except Exception:
+        pass
+
+    if NEW_TICKET_FOCUS_SECONDS > 0:
+        time.sleep(NEW_TICKET_FOCUS_SECONDS)
+
+
+def simulate_new_ticket(driver, link: str | None = None):
+    """Открывает тестовую ссылку и проигрывает звук как при новой заявке."""
+
+    link_to_open = link or TEST_TICKET_LINK
+    if not link_to_open:
+        print("Тестовая ссылка не задана — укажи TEST_TICKET_LINK в settings.py.")
+        return None
+
+    print(f"Тестовая заявка: открываем {link_to_open}")
+    driver.execute_script("window.open(arguments[0]);", link_to_open)
+    new_window_handle = driver.window_handles[-1]
+    driver.switch_to.window(new_window_handle)
+    play_sound_alert()
+    focus_new_ticket_tab(driver)
+    return new_window_handle
 
 
 def subject_matches_keywords(subject: str) -> bool:
@@ -158,7 +223,7 @@ def get_tickets_from_block(titlebox):
 
 
 def set_ticket_in_work(
-    driver, ticket_link, main_window_handle, need_take: bool
+    driver, ticket_link, main_window_handle, need_take: bool, open_only_mode: bool
 ):
     """
     Открывает тикет в НОВОЙ вкладке.
@@ -171,16 +236,23 @@ def set_ticket_in_work(
 
     Вкладку тикета не закрывает, возвращается на основную.
     """
-    should_take = need_take and AUTO_TAKE_ENABLED
-    should_set_status = AUTO_STATUS_UPDATE_ENABLED
+    should_take = (not open_only_mode) and need_take and AUTO_TAKE_ENABLED
+    should_set_status = (not open_only_mode) and AUTO_STATUS_UPDATE_ENABLED
 
-    if not should_take and not should_set_status:
+    if not should_take and not should_set_status and not open_only_mode:
         print("  → Автоматические действия отключены, тикет пропускаем.")
-        return
+        return None
 
     # Открываем новую вкладку c тикетом
     driver.execute_script("window.open(arguments[0]);", ticket_link)
     new_window_handle = driver.window_handles[-1]
+
+    if open_only_mode:
+        driver.switch_to.window(new_window_handle)
+        focus_new_ticket_tab(driver)
+        print("  → Вкладка открыта без авто-действий. Можно разбирать вручную.")
+        return new_window_handle
+
     driver.switch_to.window(new_window_handle)
 
     wait = WebDriverWait(driver, 15)
@@ -259,6 +331,7 @@ def set_ticket_in_work(
     finally:
         # Возвращаемся на главную вкладку, вкладку тикета не закрываем
         driver.switch_to.window(main_window_handle)
+        return None
 
 
 def main():
@@ -268,11 +341,21 @@ def main():
     try:
         login(driver)
 
+        if OPEN_ONLY_MODE:
+            print("Включён режим 'только открытие': автоматические действия отключены.")
+
         main_window_handle = driver.current_window_handle
         processed_ids = set()  # тикеты, которые уже обработали в этом запуске
+        last_opened_ticket_handle = None
 
         while True:
             try:
+                if OPEN_ONLY_MODE:
+                    try:
+                        driver.switch_to.window(main_window_handle)
+                    except Exception:
+                        pass
+
                 driver.refresh()
                 time.sleep(1)  # даём странице перерисоваться
 
@@ -300,6 +383,7 @@ def main():
                     print(
                         f"Новая заявка #{ticket_id} | статус: '{ticket['status']}' | тема: '{subject}'"
                     )
+                    play_sound_alert()
                     if need_take:
                         if AUTO_TAKE_ENABLED:
                             print(
@@ -310,17 +394,26 @@ def main():
                                 "  → Тема содержит ключевое слово, но авто-взятие сейчас отключено."
                             )
 
-                    set_ticket_in_work(
+                    new_ticket_handle = set_ticket_in_work(
                         driver,
                         ticket_link,
                         main_window_handle,
                         need_take=need_take,
+                        open_only_mode=OPEN_ONLY_MODE,
                     )
+                    if new_ticket_handle is not None:
+                        last_opened_ticket_handle = new_ticket_handle
                     processed_ids.add(ticket_id)
 
                 # если новых не появилось — просто молчим
             except Exception as e:
                 print(f"Ошибка в основном цикле: {e}")
+            finally:
+                if OPEN_ONLY_MODE and last_opened_ticket_handle:
+                    try:
+                        driver.switch_to.window(last_opened_ticket_handle)
+                    except Exception:
+                        last_opened_ticket_handle = None
 
             time.sleep(POLL_INTERVAL)
 
