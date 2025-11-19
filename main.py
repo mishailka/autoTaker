@@ -252,6 +252,8 @@ def set_ticket_in_work(
         focus_new_ticket_tab(driver)
         print("  → Вкладка открыта без авто-действий. Можно разбирать вручную.")
         return new_window_handle
+        driver.switch_to.window(main_window_handle)
+        return
 
     driver.switch_to.window(new_window_handle)
 
