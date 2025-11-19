@@ -59,11 +59,6 @@ def focus_new_ticket_tab(driver):
     """Пробует вывести вкладку RT на передний план."""
 
     try:
-        driver.maximize_window()
-    except Exception:
-        pass
-
-    try:
         driver.execute_script("window.focus();")
     except Exception:
         pass

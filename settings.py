@@ -24,3 +24,4 @@ NEW_TICKET_FOCUS_SECONDS = 0
 # Ссылка, которую используем в тестовой функции имитации новой заявки.
 # Можно указать любую страницу (например, конкретный тикет или форму).
 TEST_TICKET_LINK = "https://rt.original-group.ru/Search/Results.html"
+NEW_TICKET_FOCUS_SECONDS = 1.5
