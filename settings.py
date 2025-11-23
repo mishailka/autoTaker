@@ -25,3 +25,7 @@ NEW_TICKET_FOCUS_SECONDS = 0
 # Можно указать любую страницу (например, конкретный тикет или форму).
 TEST_TICKET_LINK = "https://rt.original-group.ru/Search/Results.html"
 NEW_TICKET_FOCUS_SECONDS = 1.5
+
+# Ссылка, которую нужно подсветить/активировать при появлении нового письма.
+# Оставь пустой строкой, если достаточно просто сфокусировать активное окно.
+NEW_MAIL_FOCUS_LINK = ""
