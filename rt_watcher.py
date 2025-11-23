@@ -2,6 +2,9 @@
 
 import sys
 import time
+import imaplib
+import threading
+from queue import SimpleQueue, Empty
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -22,6 +25,7 @@ from handler_common import handle_common_ticket
 from handler_vvod_v_oborot import is_vvod_v_oborot, handle_vvod_v_oborot
 from settings import (
     NEW_TICKET_FOCUS_SECONDS,
+    NEW_MAIL_FOCUS_LINK,
     OPEN_ONLY_MODE,
     SOUND_ALERT_ON_NEW_TICKET,
     TEST_TICKET_LINK,
@@ -32,6 +36,13 @@ RT_URL = "https://rt.original-group.ru/"
 USERNAME = "m.siluyanov"
 PASSWORD = "Mukunda2004!"
 POLL_INTERVAL = 5  # интервал проверки (сек)
+
+IMAP_HOST = "owa.original-group.ru"
+IMAP_PORT = 993
+IMAP_USERNAME = "m.siluyanov"
+IMAP_PASSWORD = "Mukunda2004!"
+IMAP_MAILBOX = "INBOX"
+IMAP_IDLE_TIMEOUT = 60
 
 
 def play_sound_alert():
@@ -195,6 +206,122 @@ def get_tickets_from_block(titlebox):
     return tickets
 
 
+class ImapIdleWatcher:
+    """Подписка на новые входящие письма через IMAP IDLE."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        mailbox: str = "INBOX",
+        idle_timeout: int = 60,
+        on_new_message=None,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.mailbox = mailbox
+        self.idle_timeout = idle_timeout
+        self.on_new_message = on_new_message
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def _get_message_count(self, imap: imaplib.IMAP4_SSL) -> int:
+        try:
+            typ, data = imap.select(self.mailbox, readonly=True)
+            if typ == "OK" and data and data[0]:
+                return int(data[0])
+        except Exception:
+            return 0
+        return 0
+
+    def _parse_idle_responses(self, responses, last_count: int) -> int:
+        new_count = last_count
+        for response in responses or []:
+            if not response:
+                continue
+
+            if isinstance(response, tuple) and len(response) >= 2:
+                counter, marker = response[0], response[1]
+                marker_bytes = marker if isinstance(marker, bytes) else str(marker).encode()
+                if marker_bytes.upper() == b"EXISTS":
+                    try:
+                        exists_count = int(counter)
+                    except (TypeError, ValueError):
+                        continue
+                    if exists_count > new_count:
+                        new_count = exists_count
+
+        return new_count
+
+    def _notify(self) -> None:
+        if callable(self.on_new_message):
+            try:
+                self.on_new_message()
+            except Exception:
+                pass
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                with imaplib.IMAP4_SSL(self.host, self.port) as imap:
+                    imap.login(self.username, self.password)
+                    last_exists = self._get_message_count(imap)
+
+                    while not self._stop_event.is_set():
+                        try:
+                            if hasattr(imap, "idle"):
+                                typ, _ = imap.idle()
+                                if typ != "OK":
+                                    break
+                                try:
+                                    responses = imap.idle_check(timeout=self.idle_timeout)
+                                    updated_count = self._parse_idle_responses(
+                                        responses, last_exists
+                                    )
+                                    if updated_count > last_exists:
+                                        self._notify()
+                                        last_exists = updated_count
+                                finally:
+                                    imap.idle_done()
+                            else:
+                                time.sleep(self.idle_timeout)
+                                updated_count = self._get_message_count(imap)
+                                if updated_count > last_exists:
+                                    self._notify()
+                                    last_exists = updated_count
+                        except imaplib.IMAP4.abort:
+                            break
+                        except Exception:
+                            time.sleep(1)
+            except Exception:
+                time.sleep(5)
+
+
+def handle_new_mail_event(driver, main_window_handle: str):
+    print("Получено новое письмо или ответ: воспроизводим оповещение")
+    if NEW_MAIL_FOCUS_LINK:
+        try:
+            open_ticket_in_new_tab(driver, NEW_MAIL_FOCUS_LINK)
+        finally:
+            driver.switch_to.window(main_window_handle)
+    else:
+        play_sound_alert()
+        focus_new_ticket_tab(driver)
+
+
 def main():
     driver = webdriver.Chrome()
 
@@ -204,8 +331,28 @@ def main():
         main_window_handle = driver.current_window_handle
         processed_ids = set()  # заявки, которые уже обрабатывали в этом запуске
 
+        mail_events: SimpleQueue = SimpleQueue()
+        imap_watcher = ImapIdleWatcher(
+            host=IMAP_HOST,
+            port=IMAP_PORT,
+            username=IMAP_USERNAME,
+            password=IMAP_PASSWORD,
+            mailbox=IMAP_MAILBOX,
+            idle_timeout=IMAP_IDLE_TIMEOUT,
+            on_new_message=lambda: mail_events.put(None),
+        )
+        imap_watcher.start()
+
         while True:
             try:
+                while True:
+                    try:
+                        mail_events.get_nowait()
+                    except Empty:
+                        break
+                    else:
+                        handle_new_mail_event(driver, main_window_handle)
+
                 driver.refresh()
                 time.sleep(1)
 
